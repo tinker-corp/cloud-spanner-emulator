@@ -96,7 +96,8 @@ absl::Status LogTableMod(
     TransactionID transaction_id,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
         last_mod_group_by_change_stream,
-    ReadOnlyStore* store);
+    ReadOnlyStore* store,
+    absl::Time commit_timestamp);
 
 // Build DataChangeRecords with ModGroups, set the
 // number_of_records_in_transaction field of DataChangeRecords, and then convert
@@ -106,12 +107,14 @@ std::vector<WriteOp> BuildMutation(
         data_change_records_in_transaction_by_change_stream,
     TransactionID transaction_id,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
-        last_mod_group_by_change_stream);
+        last_mod_group_by_change_stream,
+    absl::Time commit_timestamp);
 
 // Build change stream write_ops.
 absl::StatusOr<std::vector<WriteOp>> BuildChangeStreamWriteOps(
     const Schema* schema, std::vector<WriteOp> buffered_write_ops,
-    ReadOnlyStore* store, TransactionID transaction_id);
+    ReadOnlyStore* store, TransactionID transaction_id,
+    absl::Time commit_timestamp);
 }  // namespace backend
 }  // namespace emulator
 }  // namespace spanner

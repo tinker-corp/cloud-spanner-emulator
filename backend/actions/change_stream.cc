@@ -167,13 +167,14 @@ DataChangeRecord BuildDataChangeRecord(
     const ChangeStream* change_stream, TransactionID transaction_id,
     int64_t record_sequence_number,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
-        last_mod_group_by_change_stream) {
+        last_mod_group_by_change_stream,
+    absl::Time commit_timestamp) {
   std::vector<ColumnType> column_types =
       (*last_mod_group_by_change_stream)[change_stream].column_types;
   std::string record_sequence = ToFragmentIdString(record_sequence_number);
   DataChangeRecord record{
       (*last_mod_group_by_change_stream)[change_stream].partition_token_str,
-      zetasql::Value::Timestamp(kCommitTimestampValueSentinel),
+      zetasql::Value::Timestamp(commit_timestamp),
       std::to_string(transaction_id), record_sequence, false,
       tracked_table_name, column_types,
       (*last_mod_group_by_change_stream)[change_stream].mods,
@@ -327,7 +328,8 @@ absl::Status LogTableMod(
     TransactionID transaction_id,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
         last_mod_group_by_change_stream,
-    ReadOnlyStore* store) {
+    ReadOnlyStore* store,
+    absl::Time commit_timestamp) {
   std::string value_capture_type =
       change_stream->value_capture_type().has_value()
           ? change_stream->value_capture_type().value()
@@ -348,7 +350,8 @@ absl::Status LogTableMod(
           transaction_id,
           (*data_change_records_in_transaction_by_change_stream)[change_stream]
               .size(),
-          last_mod_group_by_change_stream);
+          last_mod_group_by_change_stream,
+          commit_timestamp);
       last_mod_group_by_change_stream->erase(change_stream);
       (*data_change_records_in_transaction_by_change_stream)[change_stream]
           .push_back(record);
@@ -447,7 +450,8 @@ absl::Status LogTableMod(
     TransactionID transaction_id,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
         last_mod_group_by_change_stream,
-    ReadOnlyStore* store) {
+    ReadOnlyStore* store,
+    absl::Time commit_timestamp) {
   ZETASQL_RETURN_IF_ERROR(std::visit(
       overloaded{
           [&](const InsertOp& op) -> absl::Status {
@@ -463,7 +467,8 @@ absl::Status LogTableMod(
                 tracked_columns_and_values.second, op.table, change_stream,
                 kInsert, partition_token,
                 data_change_records_in_transaction_by_change_stream,
-                transaction_id, last_mod_group_by_change_stream, store));
+                transaction_id, last_mod_group_by_change_stream, store,
+                commit_timestamp));
             return absl::OkStatus();
           },
           [&](const UpdateOp& op) -> absl::Status {
@@ -479,7 +484,8 @@ absl::Status LogTableMod(
                 tracked_columns_and_values.second, op.table, change_stream,
                 kUpdate, partition_token,
                 data_change_records_in_transaction_by_change_stream,
-                transaction_id, last_mod_group_by_change_stream, store));
+                transaction_id, last_mod_group_by_change_stream, store,
+                commit_timestamp));
             return absl::OkStatus();
           },
           [&](const DeleteOp& op) -> absl::Status {
@@ -495,7 +501,8 @@ absl::Status LogTableMod(
                 op.key, columns, {}, op.table, change_stream, kDelete,
                 partition_token,
                 data_change_records_in_transaction_by_change_stream,
-                transaction_id, last_mod_group_by_change_stream, store));
+                transaction_id, last_mod_group_by_change_stream, store,
+                commit_timestamp));
             return absl::OkStatus();
           },
       },
@@ -731,7 +738,8 @@ std::vector<WriteOp> BuildMutation(
         data_change_records_in_transaction_by_change_stream,
     TransactionID transaction_id,
     absl::flat_hash_map<const ChangeStream*, ModGroup>*
-        last_mod_group_by_change_stream) {
+        last_mod_group_by_change_stream,
+    absl::Time commit_timestamp) {
   std::vector<WriteOp> write_ops;
   // After the last user WriteOp passed into this buffer, there may be grouped
   // column types and mods by change streams that haven't been converted to
@@ -747,7 +755,8 @@ std::vector<WriteOp> BuildMutation(
         change_stream, transaction_id,
         (*data_change_records_in_transaction_by_change_stream)[change_stream]
             .size(),
-        last_mod_group_by_change_stream);
+        last_mod_group_by_change_stream,
+        commit_timestamp);
     if (!data_change_records_in_transaction_by_change_stream->contains(
             change_stream)) {
       (*data_change_records_in_transaction_by_change_stream)[change_stream] =
@@ -781,7 +790,8 @@ std::vector<WriteOp> BuildMutation(
 
 absl::StatusOr<std::vector<WriteOp>> BuildChangeStreamWriteOps(
     const Schema* schema, std::vector<WriteOp> buffered_write_ops,
-    ReadOnlyStore* store, TransactionID transaction_id) {
+    ReadOnlyStore* store, TransactionID transaction_id,
+    absl::Time commit_timestamp) {
   // Map for change streams and their partition tokens within the transaction.
   absl::flat_hash_map<const ChangeStream*, zetasql::Value>
       change_stream_with_partition_token;
@@ -809,12 +819,14 @@ absl::StatusOr<std::vector<WriteOp>> BuildChangeStreamWriteOps(
           LogTableMod(write_op, change_stream,
                       change_stream_with_partition_token[change_stream],
                       &data_change_records_in_transaction_by_change_stream,
-                      transaction_id, &last_mod_group_by_change_stream, store));
+                      transaction_id, &last_mod_group_by_change_stream, store,
+                      commit_timestamp));
     }
   }
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream,
-                    transaction_id, &last_mod_group_by_change_stream);
+                    transaction_id, &last_mod_group_by_change_stream,
+                    commit_timestamp);
   return write_ops;
 }
 

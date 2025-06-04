@@ -392,10 +392,48 @@ absl::Status ReadWriteTransaction::ProcessWriteOps(
 
 absl::Status ReadWriteTransaction::ProcessChangeStreamWriteOps() {
   mu_.AssertHeld();
+  
+  // Resolve commit timestamps in buffered operations before change stream processing
+  std::vector<WriteOp> resolved_ops;
+  for (const WriteOp& op : transaction_store_->GetBufferedOps()) {
+    resolved_ops.push_back(std::visit(
+        overloaded{
+            [&](const InsertOp& insert_op) -> WriteOp {
+              const Table* table = insert_op.table;
+              Key resolved_key = MaybeSetCommitTimestamp(
+                  table->primary_key(), insert_op.key, commit_timestamp_);
+              ValueList resolved_values;
+              for (int i = 0; i < insert_op.columns.size(); i++) {
+                resolved_values.push_back(MaybeSetCommitTimestamp(
+                    insert_op.columns[i], insert_op.values[i], commit_timestamp_));
+              }
+              return InsertOp{table, resolved_key, insert_op.columns, resolved_values};
+            },
+            [&](const UpdateOp& update_op) -> WriteOp {
+              const Table* table = update_op.table;
+              Key resolved_key = MaybeSetCommitTimestamp(
+                  table->primary_key(), update_op.key, commit_timestamp_);
+              ValueList resolved_values;
+              for (int i = 0; i < update_op.columns.size(); i++) {
+                resolved_values.push_back(MaybeSetCommitTimestamp(
+                    update_op.columns[i], update_op.values[i], commit_timestamp_));
+              }
+              return UpdateOp{table, resolved_key, update_op.columns, resolved_values};
+            },
+            [&](const DeleteOp& delete_op) -> WriteOp {
+              const Table* table = delete_op.table;
+              Key resolved_key = MaybeSetCommitTimestamp(
+                  table->primary_key(), delete_op.key, commit_timestamp_);
+              return DeleteOp{table, resolved_key};
+            },
+        },
+        op));
+  }
+
   ZETASQL_ASSIGN_OR_RETURN(
       auto write_ops,
-      BuildChangeStreamWriteOps(schema_, transaction_store_->GetBufferedOps(),
-                                action_context_->store(), id_));
+      BuildChangeStreamWriteOps(schema_, resolved_ops,
+                                action_context_->store(), id_, commit_timestamp_));
   for (const WriteOp& writeop : write_ops) {
     ZETASQL_RETURN_IF_ERROR(transaction_store_->BufferWriteOp(writeop));
   }
@@ -580,7 +618,6 @@ absl::Status ReadWriteTransaction::Commit() {
     if (retry_state_.abort_retry_count == 0 && ShouldAbortOnFirstCommit()) {
       return error::AbortReadWriteTransactionOnFirstCommit(id_);
     }
-    ZETASQL_RETURN_IF_ERROR(ProcessChangeStreamWriteOps());
 
     // When committing, comparison may be required in the process. Comparison of
     // PG.NUMERIC calls PG to get comparison result (see function
@@ -593,6 +630,9 @@ absl::Status ReadWriteTransaction::Commit() {
 
     // Pick a commit timestamp.
     ZETASQL_ASSIGN_OR_RETURN(commit_timestamp_, lock_handle_->ReserveCommitTimestamp());
+
+    // Process change stream write ops after commit timestamp is available
+    ZETASQL_RETURN_IF_ERROR(ProcessChangeStreamWriteOps());
 
     // Write the mutations to the base storage.
     absl::Status flush_status = FlushWriteOpsToStorage(

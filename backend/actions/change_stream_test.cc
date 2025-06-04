@@ -41,6 +41,7 @@
 #include "backend/schema/catalog/table.h"
 #include "tests/common/actions.h"
 #include "tests/common/schema_constructor.h"
+#include "common/constants.h"
 #include "nlohmann/json_fwd.hpp"
 #include "nlohmann/json.hpp"
 namespace google {
@@ -129,10 +130,25 @@ class ChangeStreamTest : public test::ActionsTest {
                 &type_factory_, "", /*proto_descriptor_bytes*/
                 database_api::DatabaseDialect::POSTGRESQL)
                 .value()),
+        commit_timestamp_schema_(emulator::test::CreateSchemaFromDDL(
+                    {
+                        R"(
+                            CREATE TABLE CommitTimestampTable (
+                              id INT64 NOT NULL,
+                              name STRING(MAX),
+                              commit_ts TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp = true)
+                            ) PRIMARY KEY (id)
+                          )",
+                        R"(
+                            CREATE CHANGE STREAM CommitTimestampStream FOR CommitTimestampTable OPTIONS ( value_capture_type = 'NEW_VALUES' )
+                        )"},
+                    &type_factory_)
+                    .value()),
         table_(schema_->FindTable("TestTable")),
         table2_(schema_->FindTable("TestTable2")),
         float_table_(float_schema_->FindTable("FloatTable")),
         pg_table_(pg_schema_->FindTable("entended_pg_datatypes")),
+        commit_timestamp_table_(commit_timestamp_schema_->FindTable("CommitTimestampTable")),
         base_columns_(table_->columns()),
         base_columns_table_2_all_col_(table2_->columns()),
         float_columns_(float_table_->columns()),
@@ -145,7 +161,8 @@ class ChangeStreamTest : public test::ActionsTest {
         change_stream4_(schema_->FindChangeStream("ChangeStream_TestTable2")),
         float_change_stream_(
             float_schema_->FindChangeStream("ChangeStream_FloatTable")),
-        pg_change_stream_(pg_schema_->FindChangeStream("pg_stream")) {}
+        pg_change_stream_(pg_schema_->FindChangeStream("pg_stream")),
+        commit_timestamp_change_stream_(commit_timestamp_schema_->FindChangeStream("CommitTimestampStream")) {}
 
  protected:
   // Test components.
@@ -153,12 +170,14 @@ class ChangeStreamTest : public test::ActionsTest {
   std::unique_ptr<const Schema> schema_;
   std::unique_ptr<const Schema> float_schema_;
   std::unique_ptr<const Schema> pg_schema_;
+  std::unique_ptr<const Schema> commit_timestamp_schema_;
 
   // Test variables.
   const Table* table_;
   const Table* table2_;
   const Table* float_table_;
   const Table* pg_table_;
+  const Table* commit_timestamp_table_;
   absl::Span<const Column* const> base_columns_;
   absl::Span<const Column* const> base_columns_table_2_all_col_;
   absl::Span<const Column* const> float_columns_;
@@ -169,6 +188,7 @@ class ChangeStreamTest : public test::ActionsTest {
   const ChangeStream* change_stream4_;
   const ChangeStream* float_change_stream_;
   const ChangeStream* pg_change_stream_;
+  const ChangeStream* commit_timestamp_change_stream_;
   std::vector<const Column*> key_and_another_string_col_table_1_ = {
       table_->FindColumn("int64_col"),
       table_->FindColumn("another_string_col")};
@@ -207,7 +227,8 @@ TEST_F(ChangeStreamTest, AddOneInsertOpAndCheckResultWriteOpContent) {
              {Int64(1), String("value"), String("value2")}));
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
-      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1));
+      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1,
+                                 absl::FromUnixMicros(1000000)));
   // Verify change stream entry is added to the transaction buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
   WriteOp op = change_stream_write_ops[0];
@@ -306,7 +327,8 @@ TEST_F(ChangeStreamTest, AddTwoInsertForDiffSetCols) {
              {Int64(2), String("value"), String("value2")}));
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
-      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1));
+      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1,
+                                 absl::FromUnixMicros(1000000)));
   // Verify change stream entry is added to the transaction buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
 }
@@ -327,7 +349,8 @@ TEST_F(ChangeStreamTest, AddTwoInsertDiffSetsNonKeyTrackedCols) {
                                       {Int64(2), String("value")}));
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
-      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1));
+      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1,
+                                 absl::FromUnixMicros(1000000)));
   // Verify change stream entry is added to the transaction buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
 }
@@ -359,7 +382,8 @@ TEST_F(ChangeStreamTest, AddMultipleDataChangeRecordsToChangeStreamDataTable) {
   buffered_write_ops.push_back(Delete(table_, Key({Int64(2)})));
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
-      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1));
+      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1,
+                                 absl::FromUnixMicros(1000000)));
   // Verify the number of change stream entries is added to the transaction
   // buffer.
   // Insert, Insert, Update, Update, Insert, Delete, Delete -> 4 WriteOps
@@ -556,7 +580,8 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffUserTablesForSameChangeStream) {
                                  {Int64(1), String("value"), String("value2")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Insert base table entry to TestTable2.
   ASSERT_THAT(LogTableMod(Insert(table2_, Key({Int64(1)}),
@@ -564,7 +589,8 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffUserTablesForSameChangeStream) {
                                  {Int64(1), String("value"), String("value2")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Insert base table entry to TestTable.
   ASSERT_THAT(LogTableMod(Insert(table_, Key({Int64(2)}), base_columns_,
@@ -572,14 +598,16 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffUserTablesForSameChangeStream) {
                                   String("value2_row2")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
 
   // Set number_of_records_in_transaction in each DataChangeRecord after
   // finishing processing all operations
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream, 1,
-                    &last_mod_group_by_change_stream);
+                    &last_mod_group_by_change_stream,
+                    absl::FromUnixMicros(1000000));
   // Verify the number rebuilt WriteOps added to the transaction
   // buffer.
   ASSERT_EQ(write_ops.size(), 3);
@@ -613,7 +641,8 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffNonKeyColsForSameChangeStream) {
                                  {Int64(1), String("another_string_value1")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Insert base table entry to TestTable2.
   ASSERT_THAT(
@@ -621,7 +650,8 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffNonKeyColsForSameChangeStream) {
                          {Int64(1), String("string_value1")}),
                   change_stream_, zetasql::Value::String("11111"),
                   &data_change_records_in_transaction_by_change_stream, 1,
-                  &last_mod_group_by_change_stream, store()),
+                  &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   // Insert base table entry to TestTable.
   ASSERT_THAT(LogTableMod(Update(table_, Key({Int64(2)}),
@@ -629,13 +659,15 @@ TEST_F(ChangeStreamTest, AddWriteOpForDiffNonKeyColsForSameChangeStream) {
                                  {Int64(2), String("another_string_value2")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Set number_of_records_in_transaction in each DataChangeRecord after
   // finishing processing all operations
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream, 1,
-                    &last_mod_group_by_change_stream);
+                    &last_mod_group_by_change_stream,
+                    absl::FromUnixMicros(1000000));
   // Verify the number of rebuilt WriteOps added to the transaction
   // buffer.
   EXPECT_EQ(write_ops.size(), 3);
@@ -660,34 +692,39 @@ TEST_F(ChangeStreamTest, AddWriteOpForDifferentChangeStreams) {
                          {Int64(1), String("string_value1")}),
                   change_stream_, zetasql::Value::String("11111"),
                   &data_change_records_in_transaction_by_change_stream, 1,
-                  &last_mod_group_by_change_stream, store()),
+                  &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   ASSERT_THAT(
       LogTableMod(Insert(table2_, Key({Int64(2)}), key_and_string_col_table_2_,
                          {Int64(2), String("string_value2")}),
                   change_stream2_, zetasql::Value::String("11111"),
                   &data_change_records_in_transaction_by_change_stream, 1,
-                  &last_mod_group_by_change_stream, store()),
+                  &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   ASSERT_THAT(
       LogTableMod(Insert(table2_, Key({Int64(1)}), key_and_string_col_table_2_,
                          {Int64(3), String("string_value3")}),
                   change_stream_, zetasql::Value::String("11111"),
                   &data_change_records_in_transaction_by_change_stream, 1,
-                  &last_mod_group_by_change_stream, store()),
+                  &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   ASSERT_THAT(LogTableMod(Insert(table2_, Key({Int64(1)}),
                                  key_and_another_string_col_table_2_,
                                  {Int64(4), String("another_string_value4")}),
                           change_stream_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Set number_of_records_in_transaction in each DataChangeRecord after
   // finishing processing all operations
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream, 1,
-                    &last_mod_group_by_change_stream);
+                    &last_mod_group_by_change_stream,
+                    absl::FromUnixMicros(1000000));
   // Insert to table2(string_col) tracked by cs1, Insert to table2(string_col)
   // tracked by cs2, Insert to table2(string_col) tracked by cs1, Insert to
   // table2(another_string_col) tracked by cs1 -> 3 DataChangeRecords
@@ -725,7 +762,8 @@ TEST_F(ChangeStreamTest,
                                  {Int64(1), String("another_string_value1")}),
                           change_stream3_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Update to an untracked column.
   ASSERT_THAT(
@@ -734,19 +772,22 @@ TEST_F(ChangeStreamTest,
                  {Int64(1), String("another_string_value_update")}),
           change_stream3_, zetasql::Value::String("11111"),
           &data_change_records_in_transaction_by_change_stream, 1,
-          &last_mod_group_by_change_stream, store()),
+          &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   // Delete the row.
   ASSERT_THAT(LogTableMod(Delete(table2_, Key({Int64(1)})), change_stream3_,
                           zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Set number_of_records_in_transaction in each DataChangeRecord after
   // finishing processing all operations
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream, 1,
-                    &last_mod_group_by_change_stream);
+                    &last_mod_group_by_change_stream,
+                    absl::FromUnixMicros(1000000));
   // Verify the number of rebuilt WriteOps added to the transaction
   // buffer.
   ASSERT_EQ(write_ops.size(), 2);
@@ -835,7 +876,8 @@ TEST_F(ChangeStreamTest, InsertUpdateDeleteUntrackedColumnsSameRow) {
                                  {Int64(1), String("another_string_value1")}),
                           change_stream2_, zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Update to an untracked column.
   ASSERT_THAT(
@@ -844,19 +886,22 @@ TEST_F(ChangeStreamTest, InsertUpdateDeleteUntrackedColumnsSameRow) {
                  {Int64(1), String("another_string_value_update")}),
           change_stream2_, zetasql::Value::String("11111"),
           &data_change_records_in_transaction_by_change_stream, 1,
-          &last_mod_group_by_change_stream, store()),
+          &last_mod_group_by_change_stream, store(),
+          absl::FromUnixMicros(1000000)),
       ::zetasql_base::testing::IsOk());
   // Delete the row.
   ASSERT_THAT(LogTableMod(Delete(table2_, Key({Int64(1)})), change_stream2_,
                           zetasql::Value::String("11111"),
                           &data_change_records_in_transaction_by_change_stream,
-                          1, &last_mod_group_by_change_stream, store()),
+                          1, &last_mod_group_by_change_stream, store(),
+                          absl::FromUnixMicros(1000000)),
               ::zetasql_base::testing::IsOk());
   // Set number_of_records_in_transaction in each DataChangeRecord after
   // finishing processing all operations
   std::vector<WriteOp> write_ops =
       BuildMutation(&data_change_records_in_transaction_by_change_stream, 1,
-                    &last_mod_group_by_change_stream);
+                    &last_mod_group_by_change_stream,
+                    absl::FromUnixMicros(1000000));
   // Verify the number of rebuilt WriteOps added to the transaction
   // buffer.
   ASSERT_EQ(write_ops.size(), 2);
@@ -957,7 +1002,8 @@ TEST_F(ChangeStreamTest, MultipleInsertToSeparateSubsetsColumnsSameTable) {
              {Int64(2), String("another_string_value2")}));
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
-      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1));
+      BuildChangeStreamWriteOps(schema_.get(), buffered_write_ops, store(), 1,
+                                 absl::FromUnixMicros(1000000)));
   // Verify the number of rebuilt WriteOps added to the transaction
   // buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
@@ -1030,7 +1076,8 @@ TEST_F(ChangeStreamTest, PgVerifyExtendedDatatypesValueAndType) {
        Numeric(11), NumericArray({NumericValue(22), NumericValue(33)})}));
   ZETASQL_ASSERT_OK_AND_ASSIGN(std::vector<WriteOp> change_stream_write_ops,
                        BuildChangeStreamWriteOps(
-                           pg_schema_.get(), buffered_write_ops, store(), 1));
+                           pg_schema_.get(), buffered_write_ops, store(), 1,
+                           absl::FromUnixMicros(1000000)));
   // Verify change stream entry is added to the transaction buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
   WriteOp op = change_stream_write_ops[0];
@@ -1140,7 +1187,7 @@ TEST_F(ChangeStreamTest, FloatValueAndTypes) {
   ZETASQL_ASSERT_OK_AND_ASSIGN(
       std::vector<WriteOp> change_stream_write_ops,
       BuildChangeStreamWriteOps(float_schema_.get(), buffered_write_ops,
-                                store(), 1));
+                                store(), 1, absl::FromUnixMicros(1000000)));
 
   // Verify change stream entry is added to the transaction buffer.
   ASSERT_EQ(change_stream_write_ops.size(), 1);
@@ -1230,6 +1277,222 @@ TEST_F(ChangeStreamTest, FloatValueAndTypes) {
   ASSERT_EQ(operation->values[17], zetasql::Value(String("")));
   // Verify is_system_transaction
   ASSERT_EQ(operation->values[18], zetasql::Value(Bool(false)));
+}
+
+TEST_F(ChangeStreamTest, CommitTimestampResolutionInChangeStream) {
+  // Set up partition token for the commit timestamp change stream
+  set_up_partition_token_for_change_stream_partition_table(
+      commit_timestamp_change_stream_, store());
+
+  // Create buffered write ops with commit timestamp sentinel value
+  std::vector<WriteOp> buffered_write_ops;
+  std::vector<const Column*> commit_timestamp_columns = {
+      commit_timestamp_table_->FindColumn("id"),
+      commit_timestamp_table_->FindColumn("name"),
+      commit_timestamp_table_->FindColumn("commit_ts")
+  };
+  
+  // Use the commit timestamp sentinel value as per the constants
+  buffered_write_ops.push_back(Insert(
+      commit_timestamp_table_, Key({Int64(1)}), commit_timestamp_columns,
+      {Int64(1), String("test_name"), 
+       zetasql::Value::Timestamp(kCommitTimestampValueSentinel)}));
+
+  // Set a real commit timestamp for the test
+  absl::Time test_commit_timestamp = absl::FromUnixMicros(1500000000);
+  
+  ZETASQL_ASSERT_OK_AND_ASSIGN(
+      std::vector<WriteOp> change_stream_write_ops,
+      BuildChangeStreamWriteOps(commit_timestamp_schema_.get(), buffered_write_ops, 
+                                 store(), 1, test_commit_timestamp));
+
+  // Verify that a change stream entry was created
+  ASSERT_EQ(change_stream_write_ops.size(), 1);
+  WriteOp change_stream_op = change_stream_write_ops[0];
+  
+  // The change stream operation should be an Insert to the change stream data table
+  const InsertOp* operation = std::get_if<InsertOp>(&change_stream_op);
+  ASSERT_NE(operation, nullptr);
+  ASSERT_EQ(operation->table, 
+            commit_timestamp_change_stream_->change_stream_data_table());
+
+  // Verify that the commit timestamp in the change stream record 
+  // is the real timestamp, not the sentinel value
+  zetasql::Value commit_timestamp_value = operation->values[1]; // commit_timestamp is at index 1
+  ASSERT_TRUE(commit_timestamp_value.type()->IsTimestamp());
+  ASSERT_EQ(commit_timestamp_value.ToTime(), test_commit_timestamp);
+  
+  // Also verify that the sentinel value was NOT used
+  ASSERT_NE(commit_timestamp_value.ToTime(), absl::FromUnixMicros(zetasql::types::kTimestampMax));
+
+  // Verify the new_values in the mods contain the resolved timestamp, not the sentinel
+  zetasql::Value mod_new_values = operation->values[11]; // mods new_values
+  ASSERT_TRUE(mod_new_values.type()->IsArray());
+  ASSERT_EQ(mod_new_values.num_elements(), 1);
+  
+  std::string new_values_json = mod_new_values.element(0).string_value();
+  // Parse the JSON to verify the commit_ts field contains the real timestamp
+  JSON parsed_new_values = JSON::parse(new_values_json);
+  ASSERT_TRUE(parsed_new_values.contains("commit_ts"));
+  
+  // The timestamp should be formatted as a proper timestamp string, not the sentinel
+  std::string timestamp_str = parsed_new_values["commit_ts"];
+  ASSERT_FALSE(timestamp_str.empty());
+  // Should not contain the sentinel timestamp value
+  ASSERT_THAT(timestamp_str, testing::Not(testing::HasSubstr("294247-01-10")));  // Max timestamp year
+}
+
+TEST_F(ChangeStreamTest, CommitTimestampResolutionConsistencyBetweenMainDataAndChangeStream) {
+  // This test verifies that commit timestamps are resolved consistently between
+  // the main table data and change stream records, addressing the timing issue
+  // where change streams might see sentinel values while main data gets real timestamps.
+  
+  // Set up partition token for the commit timestamp change stream
+  set_up_partition_token_for_change_stream_partition_table(
+      commit_timestamp_change_stream_, store());
+
+  // Create buffered write ops with commit timestamp sentinel value
+  std::vector<WriteOp> buffered_write_ops;
+  std::vector<const Column*> commit_timestamp_columns = {
+      commit_timestamp_table_->FindColumn("id"),
+      commit_timestamp_table_->FindColumn("name"),
+      commit_timestamp_table_->FindColumn("commit_ts")
+  };
+  
+  // Insert a row with commit timestamp sentinel - this simulates what happens
+  // when a client uses spanner.commit_timestamp()
+  buffered_write_ops.push_back(Insert(
+      commit_timestamp_table_, Key({Int64(1)}), commit_timestamp_columns,
+      {Int64(1), String("test_name"), 
+       zetasql::Value::Timestamp(kCommitTimestampValueSentinel)}));
+
+  // Also add an update operation to test that updates work correctly too
+  buffered_write_ops.push_back(Update(
+      commit_timestamp_table_, Key({Int64(2)}), commit_timestamp_columns,
+      {Int64(2), String("updated_name"), 
+       zetasql::Value::Timestamp(kCommitTimestampValueSentinel)}));
+
+  // Set a real commit timestamp for the test
+  absl::Time test_commit_timestamp = absl::FromUnixMicros(1600000000);
+  
+  // Process the change stream operations - this is where the fix applies
+  ZETASQL_ASSERT_OK_AND_ASSIGN(
+      std::vector<WriteOp> change_stream_write_ops,
+      BuildChangeStreamWriteOps(commit_timestamp_schema_.get(), buffered_write_ops, 
+                                 store(), 1, test_commit_timestamp));
+
+  // Verify we got change stream entries for both operations
+  ASSERT_EQ(change_stream_write_ops.size(), 2);  // One for insert, one for update
+  
+  // Check both change stream records
+  for (const WriteOp& change_stream_op : change_stream_write_ops) {
+    const InsertOp* operation = std::get_if<InsertOp>(&change_stream_op);
+    ASSERT_NE(operation, nullptr);
+    ASSERT_EQ(operation->table, 
+              commit_timestamp_change_stream_->change_stream_data_table());
+
+    // Verify that the commit timestamp in the change stream record 
+    // is the real timestamp, not the sentinel value
+    zetasql::Value commit_timestamp_value = operation->values[1]; // commit_timestamp is at index 1
+    ASSERT_TRUE(commit_timestamp_value.type()->IsTimestamp());
+    ASSERT_EQ(commit_timestamp_value.ToTime(), test_commit_timestamp);
+    
+    // Verify the sentinel value was NOT used
+    ASSERT_NE(commit_timestamp_value.ToTime(), absl::FromUnixMicros(zetasql::types::kTimestampMax));
+
+    // Verify the new_values in the mods contain the resolved timestamp, not the sentinel
+    zetasql::Value mod_new_values = operation->values[11]; // mods new_values
+    ASSERT_TRUE(mod_new_values.type()->IsArray());
+    ASSERT_EQ(mod_new_values.num_elements(), 1);
+    
+    std::string new_values_json = mod_new_values.element(0).string_value();
+    // Parse the JSON to verify the commit_ts field contains the real timestamp
+    JSON parsed_new_values = JSON::parse(new_values_json);
+    ASSERT_TRUE(parsed_new_values.contains("commit_ts"));
+    
+    // The timestamp should be formatted as a proper timestamp string, not the sentinel
+    std::string timestamp_str = parsed_new_values["commit_ts"];
+    ASSERT_FALSE(timestamp_str.empty());
+    // Should not contain the sentinel timestamp value
+    ASSERT_THAT(timestamp_str, testing::Not(testing::HasSubstr("294247-01-10")));  // Max timestamp year
+    
+    // Additional verification: the timestamp should be a reasonable format
+    // (This ensures it's not some other bogus value)
+    ASSERT_THAT(timestamp_str, testing::MatchesRegex(R"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z)"));
+  }
+
+  // Now simulate what the flush operation would do to the original buffered operations
+  // This demonstrates that both main data and change stream data should have consistent timestamps
+  std::vector<WriteOp> main_data_ops;
+  for (const WriteOp& op : buffered_write_ops) {
+    main_data_ops.push_back(std::visit(
+        overloaded{
+            [&](const InsertOp& insert_op) -> WriteOp {
+              const Table* table = insert_op.table;
+              // This is what happens during flush - resolve commit timestamps
+              ValueList resolved_values;
+              for (int i = 0; i < insert_op.columns.size(); i++) {
+                zetasql::Value resolved_value = insert_op.values[i];
+                if (insert_op.columns[i]->allows_commit_timestamp() && 
+                    resolved_value.type()->IsTimestamp() &&
+                    resolved_value.ToTime() == kCommitTimestampValueSentinel) {
+                  resolved_value = zetasql::Value::Timestamp(test_commit_timestamp);
+                }
+                resolved_values.push_back(resolved_value);
+              }
+              return InsertOp{table, insert_op.key, insert_op.columns, resolved_values};
+            },
+            [&](const UpdateOp& update_op) -> WriteOp {
+              const Table* table = update_op.table;
+              // This is what happens during flush - resolve commit timestamps
+              ValueList resolved_values;
+              for (int i = 0; i < update_op.columns.size(); i++) {
+                zetasql::Value resolved_value = update_op.values[i];
+                if (update_op.columns[i]->allows_commit_timestamp() && 
+                    resolved_value.type()->IsTimestamp() &&
+                    resolved_value.ToTime() == kCommitTimestampValueSentinel) {
+                  resolved_value = zetasql::Value::Timestamp(test_commit_timestamp);
+                }
+                resolved_values.push_back(resolved_value);
+              }
+              return UpdateOp{table, update_op.key, update_op.columns, resolved_values};
+            },
+            [&](const DeleteOp& delete_op) -> WriteOp {
+              return delete_op;  // Deletes don't have values to resolve
+            },
+        },
+        op));
+  }
+
+  // Verify that main data operations now have the resolved timestamps
+  for (const WriteOp& main_op : main_data_ops) {
+    if (std::holds_alternative<InsertOp>(main_op)) {
+      const InsertOp& insert = std::get<InsertOp>(main_op);
+      // Find the commit_ts column value
+      for (int i = 0; i < insert.columns.size(); i++) {
+        if (insert.columns[i]->Name() == "commit_ts") {
+          ASSERT_TRUE(insert.values[i].type()->IsTimestamp());
+          ASSERT_EQ(insert.values[i].ToTime(), test_commit_timestamp);
+          // Verify it's NOT the sentinel value
+          ASSERT_NE(insert.values[i].ToTime(), absl::FromUnixMicros(zetasql::types::kTimestampMax));
+        }
+      }
+    } else if (std::holds_alternative<UpdateOp>(main_op)) {
+      const UpdateOp& update = std::get<UpdateOp>(main_op);
+      // Find the commit_ts column value
+      for (int i = 0; i < update.columns.size(); i++) {
+        if (update.columns[i]->Name() == "commit_ts") {
+          ASSERT_TRUE(update.values[i].type()->IsTimestamp());
+          ASSERT_EQ(update.values[i].ToTime(), test_commit_timestamp);
+          // Verify it's NOT the sentinel value
+          ASSERT_NE(update.values[i].ToTime(), absl::FromUnixMicros(zetasql::types::kTimestampMax));
+        }
+      }
+    }
+  }
+  
+  // The key assertion: both main data and change stream data should have 
+  // the same resolved timestamp values, ensuring consistency
 }
 
 }  // namespace

@@ -2,14 +2,14 @@
 #                                     BUILD                                    #
 ################################################################################
 
-FROM ubuntu:18.04 as build
+FROM ubuntu:22.04 AS build
 
 # Install prerequisites for bazel
-RUN apt-get update && apt-get -qq install curl tar build-essential wget        \
-    python python3.8 zip unzip
+RUN apt-get update && apt-get -y -qq install curl tar build-essential wget        \
+    python3 python3-pip zip unzip
 
 # Setup java
-RUN apt-get update && apt-get -qq install -y default-jre default-jdk
+RUN apt-get update && apt-get -y -qq install default-jre default-jdk
 
 # Install bazel
 ARG TARGETARCH
